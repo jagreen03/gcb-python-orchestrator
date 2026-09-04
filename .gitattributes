@@ -1,0 +1,6 @@
+# Normalize every text file to LF in the repo and the working tree.
+* text=auto eol=lf
+*.py   text eol=lf
+*.md   text eol=lf
+*.sh   text eol=lf
+*.txt  text eol=lf
