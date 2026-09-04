@@ -19,11 +19,19 @@ Python-side instance of the same one bit layout, not a new one.
 One beat's PE grid consumes ``GRID_DIM`` (16) distinct A row-vectors and
 ``GRID_DIM`` distinct B column-vectors (gcb-wiki/05_photonic_memory_dataflow.md
 sec. 4b), so packing "the beat's A/B slice" means 16 separate 8-byte A words
-and 16 separate 8-byte B words, not one. Deliberately out of scope here (see
-the module docstring's closing note): A/B are actually resident once per
-band/pass in the real hardware, not reloaded every beat that reuses them --
-deduplicating the byte stream against that residency is a DMA burst-
-scheduling concern, not a bit-packing one, and is left to a later task.
+and 16 separate 8-byte B words, not one.
+
+Two granularities are exposed, for two different purposes:
+
+  ``pack_beat`` / ``pack_beats`` / ``pack_stream`` -- one chunk per BEAT.
+      Simple and exact for a demo-scale, single-beat matrix (proves the bit-
+      packing), but repeats a band/tile's bytes for every beat that reuses
+      already-resident data -- NOT what a real DMA replay should send.
+  ``pack_a_band`` / ``pack_b_tile`` / ``pack_host_streams`` -- one chunk per
+      REAL ``a_load_req`` / ``b_load_req`` gcb_tensor_sram_controller.sv will
+      actually issue (once per band per pass for A, once per pass for B),
+      in the same (row/col, kstep) loop order this repo's RTL testbench
+      loaders already drive. Use this to replay a payload against real RTL.
 """
 
 from __future__ import annotations
@@ -144,6 +152,54 @@ class DMAPacker:
             a_chunks.append(a_bytes)
             b_chunks.append(b_bytes)
         return DMAPayload(a_stream=b"".join(a_chunks), b_stream=b"".join(b_chunks))
+
+    # ---- real DMA-replay granularity: one chunk per actual a_load_req /
+    #      b_load_req, not one (redundant) chunk per beat -----------------
+    def pack_a_band(self, m_band_idx: int) -> bytes:
+        """Pack ONE A row-band's full K-deep data: GRID_DIM rows x K_STEPS
+        kstep-words, in (row, kstep) order -- exactly what one a_load_req
+        for this m_band_idx needs the host DMA engine to supply, and in the
+        same loop order every do_a_load() loader in this repo's RTL
+        testbenches already drives (row outer, kstep inner). Content is the
+        same for every pass (gcb_tensor_sram_controller.sv: "A has no pass
+        memory") -- call once per (pass, m_band) the real controller will
+        actually request, via :meth:`pack_host_streams`, not once per beat.
+        """
+        m_start = m_band_idx * self.tiler.grid_dim
+        words = [
+            pack_vector(self.a[row, k_step * self.tiler.k_max:(k_step + 1) * self.tiler.k_max])
+            for row in range(m_start, m_start + self.tiler.grid_dim)
+            for k_step in range(self.tiler.k_steps)
+        ]
+        return b"".join(words)
+
+    def pack_b_tile(self, pass_idx: int) -> bytes:
+        """Pack ONE B_tile's full K-deep, N_TILE-wide data: N_TILE columns x
+        K_STEPS kstep-words, in (col, kstep) order -- exactly what one
+        b_load_req for this pass_idx needs, matching do_b_load()'s loop
+        order (col outer, kstep inner)."""
+        n_start = pass_idx * self.tiler.n_tile
+        words = [
+            pack_vector(self.b[k_step * self.tiler.k_max:(k_step + 1) * self.tiler.k_max, col])
+            for col in range(n_start, n_start + self.tiler.n_tile)
+            for k_step in range(self.tiler.k_steps)
+        ]
+        return b"".join(words)
+
+    def pack_host_streams(self) -> tuple[list[bytes], list[bytes]]:
+        """The real DMA-replay streams a host loader would serve, in the
+        exact order gcb_tensor_sram_controller.sv issues a_load_req /
+        b_load_req: ``len(a_chunks) == n_passes * m_bands`` (A reloads fresh
+        every pass), ``len(b_chunks) == n_passes``. Unlike :meth:`pack_stream`,
+        this does not repeat a chunk for every beat that reuses
+        already-resident data -- each list entry is exactly one real load."""
+        a_chunks = [
+            self.pack_a_band(m_band_idx)
+            for _pass_idx in range(self.tiler.n_passes)
+            for m_band_idx in range(self.tiler.m_bands)
+        ]
+        b_chunks = [self.pack_b_tile(pass_idx) for pass_idx in range(self.tiler.n_passes)]
+        return a_chunks, b_chunks
 
 
 # =============================================================================
