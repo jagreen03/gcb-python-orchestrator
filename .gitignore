@@ -3,3 +3,7 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+
+# Cyclopter local config / exports
+deploy/cyclopter/.env
+telemetry_export.jsonl

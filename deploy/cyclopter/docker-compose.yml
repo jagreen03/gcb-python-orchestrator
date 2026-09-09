@@ -1,0 +1,39 @@
+# =============================================================================
+# Cyclopter persistence layer - PostgreSQL + pgvector
+# =============================================================================
+# The durable, queryable record of every ticket's PBG outcome (gcb-wiki/09).
+# Lives here in gcb-python-orchestrator (control-plane tooling), never in
+# gcb-rtl / gcb-wdm-transceiver / gcb-host - gcb-wiki/04 boundary invariant.
+#
+#   docker compose -f deploy/cyclopter/docker-compose.yml up -d
+#   python scripts/load_telemetry_pg.py            # migrate + load + KNN demo
+#   docker compose -f deploy/cyclopter/docker-compose.yml down      # keep data
+#   docker compose ... down -v                     # wipe the volume
+#
+# Host port 5433 deliberately avoids the Windows bare-metal PostgreSQL 17 on
+# 5432. Password is a local-dev default; override POSTGRES_PASSWORD + the DSN
+# for anything shared.
+# =============================================================================
+
+services:
+  cyclopter-db:
+    image: pgvector/pgvector:pg16
+    container_name: cyclopter-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: cyclopter
+      POSTGRES_DB: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - cyclopter_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  cyclopter_pgdata:
+    name: cyclopter_pgdata

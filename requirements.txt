@@ -3,3 +3,5 @@ torch
 python-frontmatter
 pyyaml
 jinja2
+psycopg[binary]
+pgvector
