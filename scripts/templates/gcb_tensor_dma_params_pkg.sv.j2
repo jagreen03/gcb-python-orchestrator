@@ -1,0 +1,31 @@
+// {{ banner }}
+//
+// {{ module }} parameter package - gcb-wiki/11 sec. 0.
+// Independent knobs + every derived localparam, so no RTL recomputes them.
+// Doctrine: gcb-wiki/10 sec. 3 (Jinja2 -> pure SystemVerilog).
+
+`timescale 1ns/1ps
+
+`ifndef GCB_TENSOR_DMA_PARAMS_PKG_SV
+`define GCB_TENSOR_DMA_PARAMS_PKG_SV
+
+package gcb_tensor_dma_params_pkg;
+
+    localparam int DMA_SPEC_VERSION_BCD = 32'h{{ spec_version_bcd }};  // "{{ spec_version }}"
+
+    // ---- sec. 0: independent geometry (maps 1:1 to gcb_tensor_dma_arbiter) ----
+{%- for p in parameters %}
+    localparam int {{ "%-13s"|format(p.name) }} = {{ "%-10d"|format(p.value) }};  // {{ p.doc }}
+{%- endfor %}
+
+    // ---- derived (pure functions of the above) ----
+{%- for d in derived %}
+    localparam int {{ "%-13s"|format(d.name) }} = {{ "%-10d"|format(d.value) }};  // {{ d.doc }}
+{%- endfor %}
+
+    // Elaboration guards (gcb-wiki/11 sec. 0 / sec. 6) live in the generated
+    // wrapper's `initial` block - a `package` may not hold procedural code.
+
+endpackage : gcb_tensor_dma_params_pkg
+
+`endif  // GCB_TENSOR_DMA_PARAMS_PKG_SV

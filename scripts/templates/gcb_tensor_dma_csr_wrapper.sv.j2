@@ -1,0 +1,166 @@
+// {{ banner }}
+//
+// {{ module }} CSR wrapper - gcb-wiki/11 sec. 7.
+//
+// Instantiates gcb_tensor_dma_arbiter with parameters bound from
+// gcb_tensor_dma_params_pkg, and overlays a small block of READ-ONLY
+// geometry-mirror registers so a parameterised bitstream self-describes
+// (host reads DMA_VEC_BYTES / DMA_ROW_STRIDE / ... to learn the build).
+//
+// The arbiter owns the writable CSRs (DMA_CTRL / DMA_STATUS / DMA_IRQ_EN /
+// DMA_ADL_A / DMA_ADL_B) at word offsets 0x00..0x10; the mirror block sits at
+// 0x20.. and is decoded here. All non-CSR ports pass straight through.
+// Doctrine: gcb-wiki/10 sec. 3 (Jinja2 -> pure SystemVerilog).
+
+`timescale 1ns/1ps
+
+`ifndef GCB_TENSOR_DMA_CSR_WRAPPER_SV
+`define GCB_TENSOR_DMA_CSR_WRAPPER_SV
+
+module gcb_tensor_dma_csr_wrapper
+    import gcb_tensor_dma_params_pkg::*;
+(
+    input  logic                     clk,
+    input  logic                     rst_n,
+
+    // ---- per-GEMM sideband (from gcb_tensor_command_wiring) ----
+    input  logic                     ea_valid,
+    input  logic [EA_W-1:0]          ea_a,
+    input  logic [EA_W-1:0]          ea_b,
+    input  logic [EA_W-1:0]          ea_dst,
+    input  logic [15:0]              dim_k,
+
+    // ---- CSR / MMIO (32-bit words, byte addressed) ----
+    input  logic                     csr_we,
+    input  logic                     csr_re,
+    input  logic [CSR_ADDR_W-1:0]    csr_addr,
+    input  logic [31:0]              csr_wdata,
+    output logic [31:0]              csr_rdata,
+
+    // ---- engine A load channel ----
+    input  logic                     a_load_req,
+    input  logic [MBW-1:0]           a_load_band,
+    output logic                     a_load_done,
+    output logic                     a_wr_valid,
+    output logic [ROWW-1:0]          a_wr_row,
+    output logic [KSW-1:0]           a_wr_kstep,
+    output logic [VEC_W-1:0]         a_wr_data,
+
+    // ---- engine B load channel ----
+    input  logic                     b_load_req,
+    input  logic [NPW-1:0]           b_load_pass,
+    output logic                     b_load_done,
+    output logic                     b_wr_valid,
+    output logic [COLW-1:0]          b_wr_col,
+    output logic [KSW-1:0]           b_wr_kstep,
+    output logic [VEC_W-1:0]         b_wr_data,
+
+    // ---- abstract GDDR7 read port ----
+    output logic                     mem_cmd_valid,
+    input  logic                     mem_cmd_ready,
+    output logic [EA_W-1:0]          mem_cmd_addr,
+    output logic [BGW-1:0]           mem_cmd_bg,
+    output logic [1:0]               mem_cmd_bank,
+    output logic                     mem_cmd_bl32,
+    input  logic                     mem_rdata_valid,
+    input  logic [MEM_DATA_W-1:0]    mem_rdata,
+    input  logic                     mem_rdata_last,
+    input  logic                     mem_rerr,
+
+    // ---- status ----
+    output logic                     irq
+);
+
+    // ---- read-only geometry-mirror register offsets (gcb-wiki/11 sec. 7) ----
+{%- for m in mirror %}
+    localparam logic [CSR_ADDR_W-1:0] OFF_{{ "%-14s"|format(m.name) }} = {{ csr_addr_w }}'h{{ "%02X"|format(m.offset) }};
+{%- endfor %}
+
+    // word-aligned address of the current access
+    wire [CSR_ADDR_W-1:0] csr_word = {csr_addr[CSR_ADDR_W-1:2], 2'b00};
+
+    // ---- mirror-register read decode (registered, 1-cycle like the arbiter) ----
+    logic        mir_sel_q;
+    logic [31:0] mir_val_q;
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            mir_sel_q <= 1'b0;
+            mir_val_q <= 32'h0;
+        end else if (csr_re) begin
+            unique case (csr_word)
+{%- for m in mirror %}
+                OFF_{{ m.name }}: begin mir_sel_q <= 1'b1; mir_val_q <= 32'd{{ m.value }}; end
+{%- endfor %}
+                default: begin mir_sel_q <= 1'b0; mir_val_q <= 32'h0; end
+            endcase
+        end
+    end
+
+    // arbiter read data for everything else; mirror wins where it claims the word
+    logic [31:0] arb_rdata;
+    assign csr_rdata = mir_sel_q ? mir_val_q : arb_rdata;
+
+    // writes to the mirror block are dropped (read-only); the arbiter's own
+    // write decode already ignores unknown offsets, so csr_we passes through.
+    wire csr_we_arb = csr_we;
+
+    gcb_tensor_dma_arbiter #(
+{%- for p in arb_params %}
+        .{{ "%-12s"|format(p.name) }} ({{ p.name }}){{ "," if not loop.last }}
+{%- endfor %}
+    ) u_arb (
+        .clk             (clk),
+        .rst_n           (rst_n),
+        .ea_valid        (ea_valid),
+        .ea_a            (ea_a),
+        .ea_b            (ea_b),
+        .ea_dst          (ea_dst),
+        .dim_k           (dim_k),
+        .csr_we          (csr_we_arb),
+        .csr_re          (csr_re),
+        .csr_addr        (csr_addr),
+        .csr_wdata       (csr_wdata),
+        .csr_rdata       (arb_rdata),
+        .a_load_req      (a_load_req),
+        .a_load_band     (a_load_band),
+        .a_load_done     (a_load_done),
+        .a_wr_valid      (a_wr_valid),
+        .a_wr_row        (a_wr_row),
+        .a_wr_kstep      (a_wr_kstep),
+        .a_wr_data       (a_wr_data),
+        .b_load_req      (b_load_req),
+        .b_load_pass     (b_load_pass),
+        .b_load_done     (b_load_done),
+        .b_wr_valid      (b_wr_valid),
+        .b_wr_col        (b_wr_col),
+        .b_wr_kstep      (b_wr_kstep),
+        .b_wr_data       (b_wr_data),
+        .mem_cmd_valid   (mem_cmd_valid),
+        .mem_cmd_ready   (mem_cmd_ready),
+        .mem_cmd_addr    (mem_cmd_addr),
+        .mem_cmd_bg      (mem_cmd_bg),
+        .mem_cmd_bank    (mem_cmd_bank),
+        .mem_cmd_bl32    (mem_cmd_bl32),
+        .mem_rdata_valid (mem_rdata_valid),
+        .mem_rdata       (mem_rdata),
+        .mem_rdata_last  (mem_rdata_last),
+        .mem_rerr        (mem_rerr),
+        .irq             (irq)
+    );
+
+`ifdef SIMULATION
+    // ---- elaboration guards (gcb-wiki/11 sec. 0 / sec. 6). The datapath
+    //      carries its own copy; this catches a bad geometry at the generated
+    //      wrapper too, since a fresh dma_params.yaml is elaborated here first.
+    initial begin : dma_params_assert
+{%- for a in asserts %}
+        if (!({{ a.sv_cond }}))
+            $fatal(1, "gcb_tensor_dma_csr_wrapper: {{ a.msg }}");
+{%- endfor %}
+    end
+`endif
+
+endmodule : gcb_tensor_dma_csr_wrapper
+
+`endif  // GCB_TENSOR_DMA_CSR_WRAPPER_SV

@@ -2,3 +2,4 @@ numpy
 torch
 python-frontmatter
 pyyaml
+jinja2

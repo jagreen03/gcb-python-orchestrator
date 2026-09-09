@@ -1,0 +1,115 @@
+# =============================================================================
+# GDDR7 tensor-operand DMA - parameter & CSR source of truth
+# =============================================================================
+# Human-authored. Captures gcb-wiki/11_gddr7_tensor_dma_architecture.md sec. 0
+# (the independent geometry knobs) and sec. 7 (the CSR block). Consumed by
+# scripts/gen_dma_params.py, which renders:
+#
+#   gcb-wdm-transceiver/rtl/generated/gcb_tensor_dma_params_pkg.sv
+#   gcb-wdm-transceiver/rtl/generated/gcb_tensor_dma_csr_wrapper.sv
+#
+# Governing doctrine: gcb-wiki/10_open_source_eda_toolchain.md sec. 3
+# (parameterisation is Jinja2 -> pure SystemVerilog; no HDL-generator DSL).
+#
+# To change the DMA geometry: edit `parameters` here, re-run gen_dma_params.py,
+# commit the regenerated .sv. Never hand-edit rtl/generated/*.sv.
+# =============================================================================
+
+meta:
+  module: gcb_tensor_dma
+  doc: gcb-wiki/11_gddr7_tensor_dma_architecture.md
+  spec_version: "1.0"
+
+# ---- sec. 0: the independent knobs. These map 1:1 onto gcb_tensor_dma_arbiter
+#      parameters; everything in `derived` is a pure function of these.
+parameters:
+  EA_W:         {value: 48,   doc: "effective-address width out of the BPR (gcb-wiki/08)"}
+  OPERAND_BITS: {value: 4,    doc: "operand precision; INT4 = 4, INT8 = 8"}
+  K_MAX:        {value: 16,   doc: "MAC lanes per core = elements per K tile"}
+  GRID_DIM:     {value: 16,   doc: "systolic grid edge; A lines per band (LINES_A)"}
+  K_STEPS:      {value: 256,  doc: "K / K_MAX = k tiles per matrix row/col"}
+  N_TILE:       {value: 1024, doc: "columns resident per pass; B lines per tile (LINES_B)"}
+  M_BANDS:      {value: 256,  doc: "M / GRID_DIM = A bands per pass"}
+  N_PASSES:     {value: 4,    doc: "N / N_TILE = column passes over the M dimension"}
+  BURST_BYTES:  {value: 128,  doc: "GDDR7 BL32 payload (16 x VEC beats at INT4)"}
+  MEM_DATA_W:   {value: 256,  doc: "GDDR7 read-data bus width"}
+  N_BG:         {value: 8,    doc: "GDDR7 bank groups; also the activate-pipeline depth"}
+  CSR_ADDR_W:   {value: 6,    doc: "byte-address width of the CSR block (64 B / 16 words)"}
+
+# ---- derived localparams. `expr` is a Python expression evaluated in order
+#      against the parameters above plus helpers clog2()/width(). Emitted as
+#      `localparam int` into the package so RTL never recomputes them.
+derived:
+  - {name: VEC_BYTES,    expr: "K_MAX * OPERAND_BITS // 8",        doc: "one write-beat payload, bytes"}
+  - {name: VEC_W,        expr: "VEC_BYTES * 8",                     doc: "one write-beat payload, bits"}
+  - {name: ROW_STRIDE,   expr: "K_STEPS * VEC_BYTES",              doc: "bytes between matrix rows/cols = one GDDR7 page"}
+  - {name: BURST_BEATS,  expr: "BURST_BYTES // VEC_BYTES",         doc: "write beats reassembled from one BL32 burst"}
+  - {name: MEM_BEATS,    expr: "BURST_BYTES // (MEM_DATA_W // 8)", doc: "GDDR7 read-data beats per BL32 burst"}
+  - {name: LPB,          expr: "K_STEPS // BURST_BEATS",           doc: "BL32 bursts per matrix row/col (per page)"}
+  - {name: LINES_A,      expr: "GRID_DIM",                         doc: "A lines (matrix rows) per band"}
+  - {name: LINES_B,      expr: "N_TILE",                           doc: "B lines (matrix cols) per tile"}
+  - {name: OUTSTANDING,  expr: "N_BG",                             doc: "max in-flight read bursts = burst-FIFO depth"}
+  - {name: A_BAND_BYTES, expr: "GRID_DIM * K_STEPS * VEC_BYTES",   doc: "one A band footprint in GDDR7"}
+  - {name: B_TILE_BYTES, expr: "N_TILE * K_STEPS * VEC_BYTES",     doc: "one B tile footprint in GDDR7"}
+  # widths (SV $clog2 semantics: clog2(1)=0; width(n)=1 for n<=1)
+  - {name: ROWW,  expr: "width(GRID_DIM)",  doc: "a_wr_row width"}
+  - {name: COLW,  expr: "width(N_TILE)",    doc: "b_wr_col width"}
+  - {name: KSW,   expr: "width(K_STEPS)",   doc: "{a,b}_wr_kstep width"}
+  - {name: MBW,   expr: "width(M_BANDS)",   doc: "a_load_band width"}
+  - {name: NPW,   expr: "width(N_PASSES)",  doc: "b_load_pass width"}
+  - {name: BGW,   expr: "width(N_BG)",      doc: "mem_cmd_bg width"}
+  - {name: LINEW, expr: "COLW + 1",         doc: "line-index width (holds N_TILE)"}
+  - {name: BIW,   expr: "width(LPB)",       doc: "burst-index width"}
+
+# ---- elaboration-time guards. Emitted as an `initial` $fatal block in the
+#      package so a bad geometry fails at elaboration, not in simulation.
+asserts:
+  - {expr: "K_STEPS % BURST_BEATS == 0",      msg: "K_STEPS must be a multiple of BURST_BEATS"}
+  - {expr: "ROW_STRIDE == LPB * BURST_BYTES", msg: "ROW_STRIDE must equal LPB*BURST_BYTES"}
+  - {expr: "BURST_BYTES % (MEM_DATA_W // 8) == 0", msg: "BURST_BYTES must be a multiple of the MEM beat"}
+  - {expr: "LPB == 1 or (LPB & (LPB - 1)) == 0",   msg: "LPB must be 1 or a power of two"}
+  - {expr: "N_TILE > GRID_DIM * GRID_DIM",    msg: "Doc 11 sec.6: N_TILE must exceed GRID_DIM^2 for the A no-stall margin"}
+  - {expr: "M_BANDS > GRID_DIM",              msg: "Doc 11 sec.6: M_BANDS must exceed GRID_DIM for the B no-stall margin"}
+
+# ---- sec. 7: the CSR block. `core` registers are decoded inside
+#      gcb_tensor_dma_arbiter itself (documented here for one source of truth).
+#      `mirror` registers are read-only geometry constants the generated
+#      wrapper adds on top of the arbiter's CSR space so a parameterised
+#      bitstream self-describes.
+csr:
+  data_width: 32
+  core:
+    - name: DMA_CTRL
+      offset: 0x00
+      access: rw
+      fields: [{name: EN, bit: 0}, {name: STATUS_CLR, bit: 2, access: w1p}]
+    - name: DMA_STATUS
+      offset: 0x04
+      access: ro
+      fields:
+        - {name: RUNNING,  bit: 0}
+        - {name: A_BUSY,   bit: 1}
+        - {name: B_BUSY,   bit: 2}
+        - {name: UNDERRUN, bit: 3}
+        - {name: ERR,      bit: 4}
+        - {name: CFG_ERR,  bit: 5}
+    - name: DMA_IRQ_EN
+      offset: 0x08
+      access: rw
+      fields: [{name: UNDERRUN, bit: 0}, {name: ERR, bit: 1}]
+    - name: DMA_ADL_A
+      offset: 0x0C
+      access: rw
+      doc: "A-load underrun deadline, fabric cycles"
+    - name: DMA_ADL_B
+      offset: 0x10
+      access: rw
+      doc: "B-load underrun deadline, fabric cycles"
+  mirror:
+    - {name: DMA_VEC_BYTES,  offset: 0x20, value_from: VEC_BYTES}
+    - {name: DMA_ROW_STRIDE, offset: 0x24, value_from: ROW_STRIDE}
+    - {name: DMA_GRID_DIM,   offset: 0x28, value_from: GRID_DIM}
+    - {name: DMA_N_TILE,     offset: 0x2C, value_from: N_TILE}
+    - {name: DMA_M_BANDS,    offset: 0x30, value_from: M_BANDS}
+    - {name: DMA_N_PASSES,   offset: 0x34, value_from: N_PASSES}
+    - {name: DMA_B_LAYOUT,   offset: 0x38, value: 0, doc: "0 = N-major / transposed (only mode in v1)"}
