@@ -5,3 +5,7 @@ pyyaml
 jinja2
 psycopg[binary]
 pgvector
+
+# TKT-014 knowledge-graph gap-analysis spike (scripts/kg_gap_analysis_spike.py):
+# its deterministic TF-IDF fallback embedder needs no extra dependency - numpy
+# (above) is sufficient. No sentence-embedding model is committed.
