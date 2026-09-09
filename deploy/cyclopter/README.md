@@ -39,6 +39,52 @@ python scripts/load_telemetry_pg.py
 then `deploy/cyclopter/.env`, then
 `postgresql://postgres:cyclopter@localhost:5433/postgres`.
 
+## Scavenger agent (TKT-013)
+
+`../../scripts/cyclopter_scavenger.py` is a restart-safe daemon that removes the
+manual scrape+load ritual: it polls `../gcb-workspaces/backlog/*.md`
+(stdlib `stat` + content hash — no `watchdog` dependency) and, when a ticket
+**transitions into a graded, closed state** (`status: done` **and**
+`telemetry_color != pending`) or an already-closed ticket's file changes, it
+debounces, takes a PID lock, and runs `parse_pbg_telemetry.py` +
+`load_telemetry_pg.py` unchanged so the store converges with no human step.
+Per-ticket `(hash, status, color)` is persisted to `.scavenger_state.json`, so a
+kill+restart re-reads state, finds the DB already converged, and does not
+double-process; `SIGINT`/`SIGTERM` finish the current pass, save state, drop the
+lock, exit 0.
+
+```bash
+# one reconcile pass then exit (CI / cron)
+python scripts/cyclopter_scavenger.py --once
+
+# long-running watch, 5 s poll, emit the diversification artifact on each closure
+python scripts/cyclopter_scavenger.py --interval 5 --noise 5
+
+# preview only — detect + log, never scrape / upsert / write
+python scripts/cyclopter_scavenger.py --once --dry-run
+```
+
+### Stochastic-noise artifact (retrieval diversification)
+
+`--noise K` makes the agent write, **after a successful upsert**, a
+timestamped, provenance-tagged JSON file under `deploy/cyclopter/noise/`
+(git-ignored). It is **retrieval diversification, not perturbation**: a
+read-only `SELECT` sample of `pbg_telemetry` meant to widen what a downstream
+RAG planner sees. It is **never** written back into `pbg_telemetry` and it never
+alters a stored vector.
+
+Contents:
+
+| part | how it is chosen |
+|---|---|
+| **K cosine neighbours** | exact `telemetry_vec <=> query` nearest non-`pending` rows. Query vector = the trigger ticket's own row (default), `--noise-vector "[x,y,z]"`, or the most-recently-updated non-`pending` row when there is no trigger. The trigger row itself is excluded. |
+| **M random rows** (`--noise-random`, default 3) | a `random.Random(seed)` uniform draw from the remaining non-`pending` rows; `seed` (default: UTC `YYYYMMDD`, or `--seed`) is recorded in the file. |
+
+Each entry carries a `provenance` tag (`cosine_neighbor` + rank + `cos_dist`, or
+`random_sample` + `seed` + `pick_index`). The header records the query vector and
+its source, K, M, the seed, the DB host (never credentials), and the
+`gcb-workspaces` git HEAD. Schema id: `cyclopter.scavenger.noise/v1`.
+
 ## Query it directly
 
 ```sql

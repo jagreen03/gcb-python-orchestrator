@@ -7,3 +7,8 @@ venv/
 # Cyclopter local config / exports
 deploy/cyclopter/.env
 telemetry_export.jsonl
+
+# Cyclopter scavenger (TKT-013) - local runtime state / output
+deploy/cyclopter/noise/
+deploy/cyclopter/.scavenger_state.json
+deploy/cyclopter/.scavenger.lock
