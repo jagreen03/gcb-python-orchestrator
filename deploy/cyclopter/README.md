@@ -18,6 +18,24 @@ Control-plane state — it lives here, **never** in `gcb-rtl` /
 
 ## Bring-up
 
+### One-click (recommended)
+
+```bash
+# from anywhere - starts the container, waits for healthy, applies the
+# COMMITTED migration verbatim via `docker exec ... psql`, verifies the schema.
+deploy/cyclopter/db_up.sh            # start + migrate + verify
+deploy/cyclopter/db_up.sh --load    # + scrape the backlog and load telemetry + KNN demo
+deploy/cyclopter/db_up.sh --down    # stop, keep the data volume
+deploy/cyclopter/db_up.sh --wipe    # stop and delete the data volume
+```
+
+`db_up.sh` is idempotent and repeatable; it deliberately applies the
+unmodified `migrations/001_pbg_telemetry.sql` (the `pgvector/pgvector:pg16`
+image has full pgvector, so the Doc 09 `vec_norm` STORED expression runs
+as checked in — no ephemeral workaround).
+
+### Manual
+
 ```bash
 # from the repo root (gcb-python-orchestrator/)
 
