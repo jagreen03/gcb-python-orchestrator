@@ -79,7 +79,9 @@ CLI
     --noise K           emit the diversification artifact with K cosine neighbours
     --noise-random M    random non-pending rows in the artifact (default 3)
     --noise-vector V    query vector for the artifact, e.g. "[1,0.5,0.5]"
-    --seed N            RNG seed for the random sample (default: UTC YYYYMMDD)
+    --seed N            RNG seed for the random sample (default: real OS
+                        entropy, different each run - TKT-020 R3; pass a
+                        fixed value here to reproduce a specific draw)
     --force             steal a stale lock
     --verbose           DEBUG logging
 """
@@ -349,8 +351,19 @@ class Scavenger:
             log.error("event=noise-skipped reason=no-psycopg")
             return None
 
+        # TKT-020 R3 containment: the prior default (bare UTC YYYYMMDD) made
+        # the "random" sample identical for the full 24h day - a fixed bias
+        # wearing a random_sample label (R3 failure scenario (b)). Per R3's
+        # own stated alternative ("draw without a fixed seed and record the
+        # drawn ids"): an explicit --seed still gives full reproducibility;
+        # absent that, seed from real OS entropy (random.Random(None) uses
+        # os.urandom under the hood) so two runs on the same day draw
+        # different samples. The actual seed used is still recorded below
+        # (rand_meta["seed"] / the emitted artifact's header) - if you need
+        # to reproduce a specific draw later, read that value and pass it
+        # back via --seed.
         seed = (int(self.args.seed) if self.args.seed is not None
-                else int(datetime.now(timezone.utc).strftime("%Y%m%d")))
+                else random.Random().randrange(1, 2**31))
         try:
             with psycopg.connect(self.dsn, autocommit=True, connect_timeout=10) as conn:
                 # -- query vector + its provenance --
@@ -636,7 +649,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--noise-vector", metavar="V",
                    help='query vector for the artifact, e.g. "[1,0.5,0.5]"')
     p.add_argument("--seed", type=int, help="RNG seed for the random sample "
-                   "(default: UTC YYYYMMDD)")
+                   "(default: real OS entropy, different each run - TKT-020 R3)")
     p.add_argument("--force", action="store_true", help="steal a stale lock")
     p.add_argument("--verbose", action="store_true", help="DEBUG logging")
     return p
